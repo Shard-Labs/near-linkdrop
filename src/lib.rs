@@ -1,21 +1,34 @@
 use borsh::{BorshDeserialize, BorshSerialize};
-use near_sdk::collections::Map;
+use near_contract_standards::non_fungible_token::TokenId;
+use near_sdk::collections::LookupSet;
 use near_sdk::json_types::{Base58PublicKey, U128};
 use near_sdk::{
-    env, ext_contract, near_bindgen, AccountId, Balance, Promise, PromiseResult, PublicKey,
+    env, ext_contract, near_bindgen, AccountId, Gas, Promise, PromiseResult, PublicKey,
 };
 
 #[global_allocator]
 static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 
-#[near_bindgen]
 #[derive(Default, BorshDeserialize, BorshSerialize)]
+pub struct NFT {
+    token_id: TokenId,
+    owner_id: AccountId,
+    approval_id: Option<u64>,
+    msg: String,
+}
+
+#[near_bindgen]
+#[derive(BorshDeserialize, BorshSerialize)]
 pub struct LinkDrop {
-    pub accounts: Map<PublicKey, Balance>,
+    // TODO: Check on this lookup
+    // Lookup map that indicates which accounts are eligible to claim the nft
+    pub accounts: LookupSet<PublicKey>,
+    pub nft_token: NFT,
 }
 
 /// Access key allowance for linkdrop keys.
 const ACCESS_KEY_ALLOWANCE: u128 = 1_000_000_000_000_000_000_000_000;
+const TRANSFER_FROM_GAS: Gas = 5_000_000_000_000;
 
 /// Gas attached to the callback from account creation.
 pub const ON_CREATE_ACCOUNT_CALLBACK_GAS: u64 = 20_000_000_000_000;
@@ -23,22 +36,16 @@ pub const ON_CREATE_ACCOUNT_CALLBACK_GAS: u64 = 20_000_000_000_000;
 /// Indicates there are no deposit for a callback for better readability.
 const NO_DEPOSIT: u128 = 0;
 
-#[ext_contract(ext_dummy_nft)]
-pub trait ExtDummyNFT {
+#[ext_contract(ext_nft)]
+pub trait ExtNFTContract {
     fn nft_transfer_call(
         &mut self,
-        receiver_id: ValidAccountId,
+        receiver_id: AccountId,
         token_id: TokenId,
         approval_id: Option<u64>,
         memo: Option<String>,
         msg: String,
-    ) -> PromiseOrValue<bool>
-
-    fn nft_is_approved(
-        &mut self,
-        token_id: TokenId,
-        approved_account_id: AccountId
-    ) -> Some<bool>
+    ) -> PromiseOrValue<bool>;
 }
 
 #[ext_contract(ext_self)]
@@ -47,10 +54,20 @@ pub trait ExtLinkDrop {
     fn on_account_created(&mut self, predecessor_account_id: AccountId, amount: U128) -> bool;
 
     /// Callback after creating account and claiming linkdrop.
-    fn on_account_created_and_claimed(&mut self, amount: U128) -> bool;
+    fn on_account_created_and_claimed(&mut self) -> bool;
 
     /// Callback after checking if current account is whitelisted.
     fn on_nft_is_approved(&mut self, predecessor_account_id: AccountId, token_id: TokenId) -> u64;
+
+    // Callback after getting approval from NFT contract owner.
+    // Note that the NFT contract will fire-and-forget this call, ignoring any return values or errors generated
+    fn nft_on_approve(
+        &mut self,
+        token_id: TokenId,
+        owner_id: AccountId,
+        approval_id: u64,
+        msg: String,
+    );
 }
 
 fn is_promise_success() -> bool {
@@ -65,6 +82,9 @@ fn is_promise_success() -> bool {
     }
 }
 
+// TODO: impl Default for LinkDrop {...
+// LookupSet needs initialization
+
 #[near_bindgen]
 impl LinkDrop {
     /// Allows given public key to claim sent balance.
@@ -76,26 +96,29 @@ impl LinkDrop {
             "Attached deposit must be greater than ACCESS_KEY_ALLOWANCE"
         );
         let pk = public_key.into();
-        let value = self.accounts.get(&pk).unwrap_or(0);
-        self.accounts.insert(
-            &pk,
-            &(value + env::attached_deposit() - ACCESS_KEY_ALLOWANCE),
-        );
-        Promise::new(env::current_account_id()).add_access_key(
-            pk,
-            ACCESS_KEY_ALLOWANCE,
-            env::current_account_id(),
-            b"claim,create_account_and_claim".to_vec(),
-        )
+        let new_account = self.accounts.insert(&pk);
+        // If the set did not have this value present, true is returned
+        if new_account {
+            Promise::new(env::current_account_id()).add_access_key(
+                pk,
+                ACCESS_KEY_ALLOWANCE,
+                env::current_account_id(),
+                // TODO: add_access_key allows given pk to call functions claim or create_account_and_claim
+                b"claim,create_account_and_claim".to_vec(),
+            )
+        } else {
+            panic!("Account already registered");
+        }
     }
 
     /// Claim tokens for specific account that are attached to the public key this tx is signed with.
-    pub fn claim(&mut self, account_id: AccountId, nft_account_id: AccountId, token_id: TokenId) -> Promise {
+    pub fn claim(&mut self, account_id: AccountId) -> Promise {
         assert_eq!(
             env::predecessor_account_id(),
             env::current_account_id(),
             "Claim only can come from this account"
         );
+        /*
         assert!(
             env::is_valid_account_id(account_id.as_bytes()),
             "Invalid account id"
@@ -104,19 +127,20 @@ impl LinkDrop {
             .accounts
             .remove(&env::signer_account_pk())
             .expect("Unexpected public key");
+        */
 
-        /* Check if contract is approved for NFT transfer*/
-        Promise::new(nft_account_id)
-            .ext_dummy_nft::nft_is_approved(token_id, env::signer_account_id())
-            .then(ext_self::on_nft_is_approved(&env::current_account_id(), token_id))
-            .then(ext_dummy_nft::nft_transfer_call(
-                account_id,
-                token_id,
-                // approval_id: Option<u64>,
-                // memo: Option<String>,
-                // msg: String,
-            ));
-        Promise::new(env::current_account_id()).delete_key(env::signer_account_pk());
+        Promise::new(env::current_account_id())
+            .delete_key(env::signer_account_pk())
+            .then(ext_nft::nft_transfer_call(
+                account_id, // Convert to ValidAccountId
+                self.nft_token.token_id.clone(),
+                self.nft_token.approval_id,
+                None, //Memo
+                self.nft_token.msg.clone(),
+                &self.nft_token.owner_id,
+                1,
+                TRANSFER_FROM_GAS,
+            ))
     }
 
     /// Create new account and and claim tokens to it.
@@ -134,16 +158,26 @@ impl LinkDrop {
             env::is_valid_account_id(new_account_id.as_bytes()),
             "Invalid account id"
         );
+        /*
         let amount = self
             .accounts
             .remove(&env::signer_account_pk())
             .expect("Unexpected public key");
+        */
         Promise::new(new_account_id)
             .create_account()
             .add_full_access_key(new_public_key.into())
-            .transfer(amount)
+            .then(ext_nft::nft_transfer_call(
+                env::signer_account_id(), // which should be new_account_id
+                self.nft_token.token_id.clone(),
+                self.nft_token.approval_id,
+                None,
+                self.nft_token.msg.clone(),
+                &self.nft_token.owner_id,
+                1,
+                TRANSFER_FROM_GAS,
+            ))
             .then(ext_self::on_account_created_and_claimed(
-                amount.into(),
                 &env::current_account_id(),
                 NO_DEPOSIT,
                 ON_CREATE_ACCOUNT_CALLBACK_GAS,
@@ -191,7 +225,7 @@ impl LinkDrop {
     }
 
     /// Callback after execution `create_account_and_claim`.
-    pub fn on_account_created_and_claimed(&mut self, amount: U128) -> bool {
+    pub fn on_account_created_and_claimed(&mut self) -> bool {
         assert_eq!(
             env::predecessor_account_id(),
             env::current_account_id(),
@@ -202,36 +236,38 @@ impl LinkDrop {
             Promise::new(env::current_account_id()).delete_key(env::signer_account_pk());
         } else {
             // In case of failure, put the amount back.
-            self.accounts
-                .insert(&env::signer_account_pk(), &amount.into());
+            self.accounts.insert(&env::signer_account_pk());
         }
         creation_succeeded
     }
 
-    pub fn on_nft_is_approved(&mut self, predecessor_account_id: AccountId, token_id: TokenId) -> u64 {
-        assert_eq!(env::predecessor_account_id(), env:current_account_id(), "Callback can only be called from the contract");
-        let approval = is_promise_success();
-        if approval {
-            // Current account id is approved by NFT contract.
-            // TODO: Get approved id from NFT account. Probably another call to NFT contract...
-            let approval_id = 0;
-            approval_id
-        }
-        else{
-            //Current account id is not in the list of approvals
-            //Not sure if something should hapen here..by now, just panic!
-            env::panic_str("Current account is not whitelisted".to_string());
-        }
+    // Callback only handles one approved NFT Contract. Once is approved, cannot be updated
+    // It is expected form the Linkdrop Contract to update on which NFT contracts, transfer is approved.
+    pub fn nft_on_approve(
+        &mut self,
+        token_id: TokenId,
+        owner_id: AccountId,
+        approval_id: Option<u64>,
+        msg: String,
+    ) {
+        self.nft_token.token_id = token_id;
+        self.nft_token.owner_id = owner_id;
+        self.nft_token.approval_id = approval_id;
+        self.nft_token.msg = msg;
     }
 
+    /* Not used
     /// Returns the balance associated with given key.
     pub fn get_key_balance(&self, key: Base58PublicKey) -> U128 {
         self.accounts
-            .get(&key.into())
+            .(&key.into())
             .expect("Key is missing")
             .into()
     }
+    */
 }
+
+// TODO: Update tests
 
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg(test)]
