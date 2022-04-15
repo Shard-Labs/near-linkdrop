@@ -85,6 +85,22 @@ fn is_promise_success() -> bool {
 // TODO: impl Default for LinkDrop {...
 // LookupSet needs initialization
 
+impl Default for LinkDrop {
+    fn default() -> Self {
+        let accounts: LookupSet<PublicKey> = LookupSet::new(0);
+        let nft_token = NFT {
+            token_id: TokenId::from(""),
+            owner_id: AccountId::from(""),
+            approval_id: Some(0),
+            msg: String::from(""),
+        };
+        Self {
+            accounts,
+            nft_token,
+        }
+    }
+}
+
 #[near_bindgen]
 impl LinkDrop {
     /// Allows given public key to claim sent balance.
