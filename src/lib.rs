@@ -90,10 +90,6 @@ impl LinkDrop {
     /// Takes ACCESS_KEY_ALLOWANCE as fee from deposit to cover account creation via an access key.
     #[payable]
     pub fn send(&mut self, public_key: Base58PublicKey) -> Promise {
-        assert!(
-            env::attached_deposit() > ACCESS_KEY_ALLOWANCE,
-            "Attached deposit must be greater than ACCESS_KEY_ALLOWANCE"
-        );
         let pk = public_key.into();
         let new_account = self.accounts.insert(&pk);
         // If the set did not have this value present, true is returned
@@ -459,14 +455,12 @@ mod tests {
         let deposit = ACCESS_KEY_ALLOWANCE * 100;
         testing_env!(VMContextBuilder::new()
             .current_account_id(linkdrop())
-            .attached_deposit(deposit)
             .finish());
         contract.send(pk.clone());
         assert_eq!(contract.public_key_is_claimable(pk.clone()), true);
         testing_env!(VMContextBuilder::new()
             .current_account_id(linkdrop())
             .account_balance(deposit)
-            .attached_deposit(deposit + 1)
             .finish());
         contract.send(pk.clone());
     }
