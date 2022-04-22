@@ -23,10 +23,10 @@ pub struct LinkDrop {
 const ACCESS_KEY_ALLOWANCE: u128 = 1_000_000_000_000_000_000_000_000;
 
 /// Gas to spend for nft transaction
-const TRANSFER_FROM_GAS: Gas = 5_000_000_000_000;
+const TRANSFER_FROM_GAS: Gas = 10_000_000_000_000;
 
 /// Gas attached to the callback from account creation.
-pub const ON_CREATE_ACCOUNT_CALLBACK_GAS: u64 = 20_000_000_000_000;
+pub const ON_CREATE_ACCOUNT_CALLBACK_GAS: u64 = 10_000_000_000_000;
 
 /// Indicates there are no deposit for a callback for better readability.
 const NO_DEPOSIT: u128 = 0;
@@ -51,7 +51,7 @@ pub trait ExtLinkDrop {
     fn on_account_created_and_claimed(&mut self) -> bool;
 
     /// Callback to update the nft_contract_id
-    fn update_nft_storage(&mut self);
+    fn update_nft_storage(&mut self, public_key: PublicKey);
 }
 
 fn is_promise_success() -> bool {
@@ -117,24 +117,23 @@ impl LinkDrop {
             true,
             "Signer must be eligible to claim the NFT"
         );
-        Promise::new(env::current_account_id())
-            .delete_key(env::signer_account_pk())
-            .then(
-                ext_nft::nft_transfer(
-                    account_id.clone(),
-                    token_id,
-                    None,
-                    None, //Memo
-                    &self.nft_contract_id.clone(),
-                    1,
-                    TRANSFER_FROM_GAS,
-                )
-                .then(ext_self::update_nft_storage(
-                    &env::current_account_id(),
-                    NO_DEPOSIT,
-                    TRANSFER_FROM_GAS,
-                )),
+        Promise::new(env::current_account_id()).then(
+            ext_nft::nft_transfer(
+                account_id.clone(),
+                token_id,
+                None,
+                None, //Memo
+                &self.nft_contract_id.clone(),
+                1,
+                TRANSFER_FROM_GAS,
             )
+            .then(ext_self::update_nft_storage(
+                env::signer_account_pk(),
+                &env::current_account_id(),
+                NO_DEPOSIT,
+                TRANSFER_FROM_GAS,
+            )),
+        )
     }
 
     /// Create new account and and claim tokens to it.
@@ -153,7 +152,7 @@ impl LinkDrop {
         if self.accounts.contains(&env::signer_account_pk()) {
             Promise::new(new_account_id.to_string())
                 .create_account()
-                .add_full_access_key(new_public_key.into()) // TODO: Check if this is necessary
+                .add_full_access_key(new_public_key.clone().into()) // TODO: Check if this is necessary
                 .then(ext_nft::nft_transfer(
                     new_account_id,
                     token_id,
@@ -163,12 +162,8 @@ impl LinkDrop {
                     1,
                     TRANSFER_FROM_GAS,
                 ))
-                .then(ext_self::on_account_created_and_claimed(
-                    &env::current_account_id(),
-                    NO_DEPOSIT,
-                    ON_CREATE_ACCOUNT_CALLBACK_GAS,
-                ))
                 .then(ext_self::update_nft_storage(
+                    new_public_key.into(),
                     &env::current_account_id(),
                     NO_DEPOSIT,
                     TRANSFER_FROM_GAS,
@@ -215,7 +210,7 @@ impl LinkDrop {
     }
 
     /// Callback after execution `create_account_and_claim`.
-    pub fn on_account_created_and_claimed(&mut self) -> bool {
+    pub fn update_nft_storage(&mut self, public_key: PublicKey) -> bool {
         assert_eq!(
             env::predecessor_account_id(),
             env::current_account_id(),
@@ -224,18 +219,10 @@ impl LinkDrop {
         let creation_succeeded = is_promise_success();
         if creation_succeeded {
             //removing key access to pk
-            Promise::new(env::current_account_id()).delete_key(env::signer_account_pk());
+            self.nft_contract_id = String::from("");
+            Promise::new(env::current_account_id()).delete_key(public_key);
         }
         creation_succeeded
-    }
-
-    pub fn update_nft_storage(&mut self) {
-        assert_eq!(
-            env::predecessor_account_id(),
-            env::current_account_id(),
-            "Create account and claim only can come from this account"
-        );
-        self.nft_contract_id = String::from("");
     }
 
     // Method returns true is given pk is able to claim the reward
