@@ -140,28 +140,28 @@ impl LinkDrop {
             "Signer must be eligible to claim the NFT"
         );
         // Check if pk is in accounts lookupset
-        if self.accounts.contains(&env::signer_account_pk()) {
-            Promise::new(new_account_id.to_string())
-                .create_account()
-                .add_full_access_key(new_public_key.clone().into()) // TODO: Check if this is necessary
-                .then(ext_nft::nft_transfer(
-                    new_account_id,
-                    token_id,
-                    None,
-                    None,
-                    &self.nft_contract_id,
-                    1,
-                    TRANSFER_FROM_GAS,
-                ))
-                .then(ext_self::update_nft_storage(
-                    new_public_key.into(),
-                    &env::current_account_id(),
-                    NO_DEPOSIT,
-                    TRANSFER_FROM_GAS,
-                ))
-        } else {
-            panic!("Public key not eligible to claim and create account");
-        }
+        assert!(
+            self.accounts.contains(&env::signer_account_pk()),
+            "Public key not eligible to claim and create account",
+        );
+        Promise::new(new_account_id.to_string())
+            .create_account()
+            .add_full_access_key(new_public_key.clone().into()) // TODO: Check if this is necessary
+            .then(ext_nft::nft_transfer(
+                new_account_id,
+                token_id,
+                None,
+                None,
+                &self.nft_contract_id,
+                1,
+                TRANSFER_FROM_GAS,
+            ))
+            .then(ext_self::update_nft_storage(
+                new_public_key.into(),
+                &env::current_account_id(),
+                NO_DEPOSIT,
+                TRANSFER_FROM_GAS,
+            ))
     }
 
     /// Create new account without linkdrop and deposit passed funds (used for creating sub accounts directly).
