@@ -93,24 +93,20 @@ impl LinkDrop {
         let pk = public_key.into();
         let new_account = self.accounts.insert(&pk);
         // If the set did not have this value present, true is returned
-        if new_account {
-            Promise::new(env::current_account_id()).add_access_key(
-                pk,
-                ACCESS_KEY_ALLOWANCE,
-                env::current_account_id(),
-                // add_access_key allows given pk to call functions claim or create_account_and_claim
-                b"claim,create_account_and_claim".to_vec(),
-            )
-        } else {
-            panic!("Account already registered");
-        }
+        assert!(new_account, "Account already registered");
+        Promise::new(env::current_account_id()).add_access_key(
+            pk,
+            ACCESS_KEY_ALLOWANCE,
+            env::current_account_id(),
+            // add_access_key allows given pk to call functions claim or create_account_and_claim
+            b"claim,create_account_and_claim".to_vec(),
+        )
     }
 
     /// Claim tokens for specific account that are attached to the public key this tx is signed with.
     pub fn claim(&mut self, account_id: ValidAccountId, token_id: TokenId) -> Promise {
-        assert_eq!(
+        assert!(
             self.accounts.contains(&env::signer_account_pk()),
-            true,
             "Signer must be eligible to claim the NFT"
         );
         Promise::new(env::current_account_id()).then(
@@ -139,9 +135,8 @@ impl LinkDrop {
         new_public_key: Base58PublicKey,
         token_id: TokenId,
     ) -> Promise {
-        assert_eq!(
+        assert!(
             self.accounts.contains(&env::signer_account_pk()),
-            true,
             "Signer must be eligible to claim the NFT"
         );
         // Check if pk is in accounts lookupset
@@ -215,7 +210,6 @@ impl LinkDrop {
         let creation_succeeded = is_promise_success();
         if creation_succeeded {
             //removing key access to pk
-            self.nft_contract_id = String::from("");
             Promise::new(env::current_account_id()).delete_key(public_key);
         }
         creation_succeeded
