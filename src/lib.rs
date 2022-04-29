@@ -1,6 +1,6 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use near_contract_standards::non_fungible_token::TokenId;
-use near_sdk::collections::LookupSet;
+use near_sdk::collections::LookupMap;
 use near_sdk::json_types::ValidAccountId;
 use near_sdk::json_types::{Base58PublicKey, U128};
 use near_sdk::{
@@ -14,7 +14,7 @@ static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 #[derive(BorshDeserialize, BorshSerialize)]
 pub struct LinkDrop {
     // Lookup map that indicates which accounts are eligible to claim the nft
-    pub accounts: LookupSet<PublicKey>,
+    pub accounts: LookupMap<PublicKey, TokenId>,
     // Stores the nft info to be claimed
     pub nft_contract_id: AccountId,
 }
@@ -27,6 +27,8 @@ const TRANSFER_FROM_GAS: Gas = 10_000_000_000_000;
 
 /// Gas attached to the callback from account creation.
 pub const ON_CREATE_ACCOUNT_CALLBACK_GAS: u64 = 10_000_000_000_000;
+
+const CREATE_SUBACCOUNT_ALLOWANCE: u128 = 1_000_000_000_000_000_000_000;
 
 /// Indicates there are no deposit for a callback for better readability.
 const NO_DEPOSIT: u128 = 0;
@@ -68,7 +70,7 @@ fn is_promise_success() -> bool {
 
 impl Default for LinkDrop {
     fn default() -> Self {
-        let empty_set: LookupSet<PublicKey> = LookupSet::new(0);
+        let empty_set: LookupMap<PublicKey, TokenId> = LookupMap::new(0);
         Self {
             accounts: empty_set,
             nft_contract_id: String::from(""),
@@ -81,7 +83,7 @@ impl LinkDrop {
     #[init]
     pub fn init(nft_contract_id: AccountId) -> Self {
         Self {
-            accounts: LookupSet::new(0),
+            accounts: LookupMap::new(0),
             nft_contract_id: nft_contract_id,
         }
     }
@@ -89,14 +91,23 @@ impl LinkDrop {
     /// Allows given public key to claim sent balance.
     /// Takes ACCESS_KEY_ALLOWANCE as fee from deposit to cover account creation via an access key.
     #[payable]
-    pub fn send(&mut self, public_key: Base58PublicKey) -> Promise {
+    pub fn send(&mut self, public_key: Base58PublicKey, token_id: TokenId) -> Promise {
+        assert_eq!(
+            env::signer_account_id(),
+            env::current_account_id(),
+            "Only the Smart Contract owner can call send method"
+        );
+        assert!(
+            env::attached_deposit() > ACCESS_KEY_ALLOWANCE,
+            "Attached deposit must be greater than ACCESS_KEY_ALLOWANCE"
+        );
         let pk = public_key.into();
-        let new_account = self.accounts.insert(&pk);
-        // If the set did not have this value present, true is returned
-        assert!(new_account, "Account already registered");
+        let new_account = self.accounts.insert(&pk, &token_id);
+        // If the set did not have this value present, None is returned
+        assert_eq!(new_account, None, "Account already registered");
         Promise::new(env::current_account_id()).add_access_key(
             pk,
-            ACCESS_KEY_ALLOWANCE,
+            env::attached_deposit(),
             env::current_account_id(),
             // add_access_key allows given pk to call functions claim or create_account_and_claim
             b"claim,create_account_and_claim".to_vec(),
@@ -104,15 +115,13 @@ impl LinkDrop {
     }
 
     /// Claim tokens for specific account that are attached to the public key this tx is signed with.
-    pub fn claim(&mut self, account_id: ValidAccountId, token_id: TokenId) -> Promise {
-        assert!(
-            self.accounts.contains(&env::signer_account_pk()),
-            "Signer must be eligible to claim the NFT"
-        );
+    pub fn claim(&mut self, account_id: ValidAccountId) -> Promise {
+        let token_id = self.accounts.get(&env::signer_account_pk());
+        assert_ne!(token_id, None, "Signer must be eligible to claim the NFT");
         Promise::new(env::current_account_id()).then(
             ext_nft::nft_transfer(
                 account_id.clone(),
-                token_id,
+                token_id.unwrap(),
                 None,
                 None, //Memo
                 &self.nft_contract_id.clone(),
@@ -129,27 +138,26 @@ impl LinkDrop {
     }
 
     /// Create new account and and claim tokens to it.
+    #[payable]
     pub fn create_account_and_claim(
         &mut self,
         new_account_id: ValidAccountId,
         new_public_key: Base58PublicKey,
-        token_id: TokenId,
     ) -> Promise {
         assert!(
-            self.accounts.contains(&env::signer_account_pk()),
-            "Signer must be eligible to claim the NFT"
+            env::attached_deposit() > CREATE_SUBACCOUNT_ALLOWANCE,
+            "Attached deposit must be greater than ACCESS_KEY_ALLOWANCE"
         );
-        // Check if pk is in accounts lookupset
-        assert!(
-            self.accounts.contains(&env::signer_account_pk()),
-            "Public key not eligible to claim and create account",
-        );
+        let token_id = self.accounts.get(&env::signer_account_pk());
+        // Check if pk is in accounts lookupmap
+        assert_ne!(token_id, None, "Signer must be eligible to claim the NFT");
         Promise::new(new_account_id.to_string())
             .create_account()
-            .add_full_access_key(new_public_key.clone().into()) // TODO: Check if this is necessary
+            .add_full_access_key(new_public_key.clone().into())
+            .transfer(env::attached_deposit())
             .then(ext_nft::nft_transfer(
                 new_account_id,
-                token_id,
+                token_id.unwrap(),
                 None,
                 None,
                 &self.nft_contract_id,
@@ -171,6 +179,11 @@ impl LinkDrop {
         new_account_id: ValidAccountId,
         new_public_key: Base58PublicKey,
     ) -> Promise {
+        assert_eq!(
+            env::signer_account_id(),
+            env::current_account_id(),
+            "Only the Smart Contract owner can call send method"
+        );
         let amount = env::attached_deposit();
         Promise::new(new_account_id.to_string())
             .create_account()
@@ -210,6 +223,7 @@ impl LinkDrop {
         let creation_succeeded = is_promise_success();
         if creation_succeeded {
             //removing key access to pk
+            self.accounts.remove(&public_key);
             Promise::new(env::current_account_id()).delete_key(public_key);
         }
         creation_succeeded
@@ -217,7 +231,7 @@ impl LinkDrop {
 
     // Method returns true is given pk is able to claim the reward
     pub fn public_key_is_claimable(&self, public_key: Base58PublicKey) -> bool {
-        self.accounts.contains(&public_key.into())
+        self.accounts.contains_key(&public_key.into())
     }
 }
 
@@ -327,6 +341,7 @@ mod tests {
         let deposit = 1_000_000;
         testing_env!(VMContextBuilder::new()
             .current_account_id(linkdrop())
+            .signer_account_id(linkdrop())
             .attached_deposit(deposit)
             .finish());
         contract.create_account(bob(), pk.clone());
@@ -343,6 +358,7 @@ mod tests {
         let deposit = 1_000_000;
         testing_env!(VMContextBuilder::new()
             .current_account_id(linkdrop())
+            .signer_account_id(linkdrop())
             .attached_deposit(deposit)
             .finish());
         contract.create_account("XYZ".to_string().try_into().unwrap(), pk.clone());
@@ -363,7 +379,7 @@ mod tests {
             .current_account_id(linkdrop())
             .attached_deposit(deposit)
             .finish());
-        contract.send(pk.clone());
+        contract.send(pk.clone(), token_id);
         // Now, send new transaction to link drop contract.
         let context = VMContextBuilder::new()
             .current_account_id(linkdrop())
@@ -375,11 +391,7 @@ mod tests {
         let pk2: Base58PublicKey = "2S87aQ1PM9o6eBcEXnTR5yBAVRTiNmvj8J8ngZ6FzSca"
             .try_into()
             .unwrap();
-        contract.create_account_and_claim(
-            "XYZ".to_string().try_into().unwrap(),
-            pk2.clone(),
-            token_id,
-        );
+        contract.create_account_and_claim("XYZ".to_string().try_into().unwrap(), pk2.clone());
         assert_eq!(contract.public_key_is_claimable(pk), true);
         assert_eq!(contract.public_key_is_claimable(pk2), false);
     }
@@ -395,9 +407,10 @@ mod tests {
         let deposit = ACCESS_KEY_ALLOWANCE * 100;
         testing_env!(VMContextBuilder::new()
             .current_account_id(linkdrop())
+            .signer_account_id(linkdrop())
             .attached_deposit(deposit)
             .finish());
-        contract.send(pk.clone());
+        contract.send(pk.clone(), token_id);
         assert_eq!(contract.public_key_is_claimable(pk.clone()), true);
         // Now, send new transaction to link drop contract.
         let context = VMContextBuilder::new()
@@ -410,7 +423,7 @@ mod tests {
         let pk2 = "2S87aQ1PM9o6eBcEXnTR5yBAVRTiNmvj8J8ngZ6FzSca"
             .try_into()
             .unwrap();
-        contract.create_account_and_claim(bob(), pk2, token_id);
+        contract.create_account_and_claim(bob(), pk2);
         // TODO: verify that proper promises were created.
     }
 
@@ -421,7 +434,6 @@ mod tests {
         let pk: Base58PublicKey = "qSq3LoufLvTCTNGC3LJePMDGrok8dHMQ5A1YD9psbiz"
             .try_into()
             .unwrap();
-        let token_id: TokenId = "0".try_into().unwrap();
         let deposit = ACCESS_KEY_ALLOWANCE * 100;
         // Now, send new transaction to link drop contract.
         let context = VMContextBuilder::new()
@@ -434,7 +446,7 @@ mod tests {
         let pk2 = "2S87aQ1PM9o6eBcEXnTR5yBAVRTiNmvj8J8ngZ6FzSca"
             .try_into()
             .unwrap();
-        contract.create_account_and_claim(bob(), pk2, token_id);
+        contract.create_account_and_claim(bob(), pk2);
         // TODO: verify that proper promises were created.
     }
 
@@ -445,18 +457,22 @@ mod tests {
         let pk: Base58PublicKey = "qSq3LoufLvTCTNGC3LJePMDGrok8dHMQ5A1YD9psbiz"
             .try_into()
             .unwrap();
+        let token_id: TokenId = "0".try_into().unwrap();
         // Deposit money to linkdrop contract.
-        let deposit = ACCESS_KEY_ALLOWANCE * 100;
+        let deposit = ACCESS_KEY_ALLOWANCE + 1;
         testing_env!(VMContextBuilder::new()
             .current_account_id(linkdrop())
+            .signer_account_id(linkdrop())
+            .attached_deposit(deposit.clone())
             .finish());
-        contract.send(pk.clone());
+        contract.send(pk.clone(), token_id.clone());
         assert_eq!(contract.public_key_is_claimable(pk.clone()), true);
         testing_env!(VMContextBuilder::new()
             .current_account_id(linkdrop())
-            .account_balance(deposit)
+            .signer_account_id(linkdrop())
+            .attached_deposit(deposit)
             .finish());
-        contract.send(pk.clone());
+        contract.send(pk.clone(), token_id);
     }
 
     #[test]
@@ -465,14 +481,15 @@ mod tests {
         let pk: Base58PublicKey = "qSq3LoufLvTCTNGC3LJePMDGrok8dHMQ5A1YD9psbiz"
             .try_into()
             .unwrap();
+        let token_id: TokenId = "0".try_into().unwrap();
         // Deposit money to linkdrop contract.
         let deposit = ACCESS_KEY_ALLOWANCE * 100;
         testing_env!(VMContextBuilder::new()
             .current_account_id(linkdrop())
-            .predecessor_account_id(linkdrop())
+            .signer_account_id(linkdrop())
             .attached_deposit(deposit)
             .finish());
-        contract.send(pk.clone());
+        contract.send(pk.clone(), token_id);
         assert_eq!(contract.public_key_is_claimable(pk.clone()), true);
 
         testing_env!(VMContextBuilder::new()
@@ -481,7 +498,7 @@ mod tests {
             .signer_account_pk(pk.clone().into())
             .attached_deposit(deposit)
             .finish());
-        contract.claim(bob(), String::from("0"));
+        contract.claim(bob());
     }
 
     #[should_panic(expected = r#"Signer must be eligible to claim the NFT"#)]
@@ -500,7 +517,7 @@ mod tests {
             .signer_account_pk(pk.clone().into())
             .attached_deposit(deposit)
             .finish());
-        contract.claim(bob(), String::from("0"));
+        contract.claim(bob());
     }
 
     #[test]
@@ -514,19 +531,18 @@ mod tests {
         let deposit = ACCESS_KEY_ALLOWANCE * 100;
         testing_env!(VMContextBuilder::new()
             .current_account_id(linkdrop())
-            .predecessor_account_id(linkdrop())
+            .signer_account_id(linkdrop())
             .attached_deposit(deposit)
             .finish());
-        contract.send(pk.clone());
+        contract.send(pk.clone(), token_id);
         assert_eq!(contract.public_key_is_claimable(pk.clone()), true);
 
         testing_env!(VMContextBuilder::new()
             .current_account_id(bob().try_into().unwrap())
-            .predecessor_account_id(linkdrop())
             .signer_account_pk(pk.clone().into())
             .attached_deposit(deposit)
             .finish());
-        contract.claim(bob(), token_id);
+        contract.claim(bob());
     }
     #[should_panic(expected = r#"The account ID is invalid"#)]
     #[test]
@@ -540,18 +556,17 @@ mod tests {
         let deposit = ACCESS_KEY_ALLOWANCE * 100;
         testing_env!(VMContextBuilder::new()
             .current_account_id(linkdrop())
-            .predecessor_account_id(linkdrop())
+            .signer_account_id(linkdrop())
             .attached_deposit(deposit)
             .finish());
-        contract.send(pk.clone());
+        contract.send(pk.clone(), token_id);
         assert_eq!(contract.public_key_is_claimable(pk.clone()), true);
 
         testing_env!(VMContextBuilder::new()
             .current_account_id(linkdrop())
-            .predecessor_account_id(linkdrop())
             .signer_account_pk(pk.clone().into())
             .attached_deposit(deposit)
             .finish());
-        contract.claim("XYZ".to_string().try_into().unwrap(), token_id);
+        contract.claim("XYZ".to_string().try_into().unwrap());
     }
 }
