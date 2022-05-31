@@ -28,7 +28,7 @@ const TRANSFER_FROM_GAS: Gas = 10_000_000_000_000;
 /// Gas attached to the callback from account creation.
 pub const ON_CREATE_ACCOUNT_CALLBACK_GAS: u64 = 10_000_000_000_000;
 
-const CREATE_SUBACCOUNT_ALLOWANCE: u128 = 1_000_000_000_000_000_000_000;
+const CREATE_SUBACCOUNT_ALLOWANCE: u128 = 2_000_000_000_000_000_000_000;
 
 /// Indicates there are no deposit for a callback for better readability.
 const NO_DEPOSIT: u128 = 0;
@@ -92,11 +92,6 @@ impl LinkDrop {
     /// Takes ACCESS_KEY_ALLOWANCE as fee from deposit to cover account creation via an access key.
     #[payable]
     pub fn send(&mut self, public_keys: Vec<Base58PublicKey>, tokens: Vec<TokenId>) {
-        assert_eq!(
-            env::signer_account_id(),
-            env::current_account_id(),
-            "Only the Smart Contract owner can call send method"
-        );
         let pk_length = public_keys.len();
         assert_eq!(
             pk_length,
@@ -124,6 +119,11 @@ impl LinkDrop {
 
     /// Claim tokens for specific account that are attached to the public key this tx is signed with.
     pub fn claim(&mut self, account_id: ValidAccountId) -> Promise {
+        assert_eq!(
+            env::predecessor_account_id(),
+            env::current_account_id(),
+            "Claim only can come from this account"
+        );
         // Check if pk is in accounts lookupmap
         assert!(
             self.accounts.contains_key(&env::signer_account_pk()),
@@ -150,15 +150,15 @@ impl LinkDrop {
     }
 
     /// Create new account and and claim tokens to it.
-    #[payable]
     pub fn create_account_and_claim(
         &mut self,
         new_account_id: ValidAccountId,
         new_public_key: Base58PublicKey,
     ) -> Promise {
-        assert!(
-            env::attached_deposit() >= CREATE_SUBACCOUNT_ALLOWANCE,
-            "Attached deposit must be greater than ACCESS_KEY_ALLOWANCE"
+        assert_eq!(
+            env::predecessor_account_id(),
+            env::current_account_id(),
+            "Claim only can come from this account"
         );
         // Check if pk is in accounts lookupmap
         assert!(
@@ -168,8 +168,8 @@ impl LinkDrop {
         let token_id = self.accounts.get(&env::signer_account_pk());
         Promise::new(new_account_id.to_string())
             .create_account()
+            .transfer(CREATE_SUBACCOUNT_ALLOWANCE)
             .add_full_access_key(new_public_key.clone().into())
-            .transfer(env::attached_deposit())
             .then(ext_nft::nft_transfer(
                 new_account_id,
                 token_id.unwrap(),
@@ -262,6 +262,7 @@ mod tests {
     use near_sdk::{testing_env, Balance, BlockHeight, PublicKey, VMContext};
 
     use super::*;
+    const CREATE_SUBACCOUNT_ALLOWANCE: u128 = 1_000_000_000_000_000_000_000;
 
     pub struct VMContextBuilder {
         context: VMContext,
@@ -430,6 +431,7 @@ mod tests {
         // Now, send new transaction to link drop contract.
         let context = VMContextBuilder::new()
             .current_account_id(linkdrop())
+            .predecessor_account_id(linkdrop())
             .signer_account_pk(pk.into())
             .account_balance(deposit)
             .attached_deposit(deposit as Balance)
@@ -553,7 +555,8 @@ mod tests {
         assert_eq!(contract.public_key_is_claimable(pk.clone()), true);
 
         testing_env!(VMContextBuilder::new()
-            .current_account_id(bob().try_into().unwrap())
+            .current_account_id(linkdrop())
+            .predecessor_account_id(linkdrop())
             .signer_account_pk(pk.clone().into())
             .attached_deposit(deposit)
             .finish());
