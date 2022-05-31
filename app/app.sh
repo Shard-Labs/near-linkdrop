@@ -44,26 +44,13 @@ case $1 in
     '--claim')
         # Claim reward for given account id
         echo 'Claim reward'
-        args=$3
-        if [ -z "$args" ]; then
-            args='{"account_id": "bob.testnet"}'
-        fi
-        near call linkdrop."$master_account" claim "$args" \
-            --accountId $4 \
-            --gas $GAS
+        node tx_claim.js
         ;;
 
     '--create-acc-claim')
         # Creates a subaccount under linkdrop."$master_account" and claims the reward for the new account
         echo 'Create account and claim reward'
-        args=$3
-        if [ -z "$args" ]; then
-            args='{"new_account_id": "bob.testnet", "new_public_key": "J1Q32xAYCiDmwwcf7A3c4XGsPgN5AyvioVZJfDHpoaeN"}'
-        fi
-        near call linkdrop."$master_account" create_account_and_claim \
-            "$args" \
-            --accountId $4
-            --gas $GAS
+        node tx_create_account_and_claim.js
         ;;
     
     '--public_key_is_claimable')
